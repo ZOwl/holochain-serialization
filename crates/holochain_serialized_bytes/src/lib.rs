@@ -5,13 +5,16 @@ extern crate serde_derive;
 extern crate rmp_serde;
 extern crate serde_json;
 
-#[derive(Deserialize)]
+use std::convert::TryFrom;
+// use std::convert::TryInto;
+
+#[derive(Serialize, Deserialize)]
 /// @TODO this is hacky
 /// i filed an upstream issue
 /// https://github.com/3Hren/msgpack-rust/issues/244
-enum FakeResult<T, E> {
-    Ok(T),
-    Err(E),
+pub enum Result {
+    Ok(SerializedBytes),
+    Err(SerializedBytes),
 }
 
 #[derive(Debug)]
@@ -24,7 +27,7 @@ pub enum SerializedBytesError {
     FromBytes(String),
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SerializedBytes(Vec<u8>);
 
 impl std::fmt::Debug for SerializedBytes {
@@ -45,7 +48,7 @@ macro_rules! holochain_serial {
         $(
             impl std::convert::TryFrom<$t> for $crate::SerializedBytes {
                 type Error = $crate::SerializedBytesError;
-                fn try_from(t: $t) -> Result<$crate::SerializedBytes, $crate::SerializedBytesError> {
+                fn try_from(t: $t) -> std::result::Result<$crate::SerializedBytes, $crate::SerializedBytesError> {
                     match $crate::rmp_serde::to_vec_named(&t) {
                         Ok(v) => Ok($crate::SerializedBytes(v)),
                         Err(e) => Err($crate::SerializedBytesError::ToBytes(e.to_string())),
@@ -53,9 +56,9 @@ macro_rules! holochain_serial {
                 }
             }
 
-            impl<S: $crate::serde::Serialize> std::convert::TryFrom<Result<$t, S>> for $crate::SerializedBytes {
+            impl std::convert::TryFrom<Option<$t>> for $crate::SerializedBytes {
                 type Error = $crate::SerializedBytesError;
-                fn try_from(r: Result<$t, S>) -> Result<$crate::SerializedBytes, $crate::SerializedBytesError> {
+                fn try_from(r: Option<$t>) -> std::result::Result<$crate::SerializedBytes, $crate::SerializedBytesError> {
                     match $crate::rmp_serde::to_vec_named(&r) {
                         Ok(v) => Ok($crate::SerializedBytes(v)),
                         Err(e) => Err($crate::SerializedBytesError::ToBytes(e.to_string())),
@@ -65,7 +68,7 @@ macro_rules! holochain_serial {
 
             impl std::convert::TryFrom<$crate::SerializedBytes> for $t {
                 type Error = $crate::SerializedBytesError;
-                fn try_from(sb: $crate::SerializedBytes) -> Result<$t, $crate::SerializedBytesError> {
+                fn try_from(sb: $crate::SerializedBytes) -> std::result::Result<$t, $crate::SerializedBytesError> {
                     match $crate::rmp_serde::from_read_ref(&sb.0) {
                         Ok(v) => Ok(v),
                         Err(e) => Err($crate::SerializedBytesError::FromBytes(e.to_string())),
@@ -73,27 +76,88 @@ macro_rules! holochain_serial {
                 }
             }
 
-            impl<D: $crate::serde::de::DeserializeOwned> std::convert::TryFrom<$crate::SerializedBytes> for Result<$t, D> {
-                type Error = $crate::SerializedBytesError;
-                fn try_from(sb: $crate::SerializedBytes) -> Result<Result<$t, D>, $crate::SerializedBytesError> {
-                    match $crate::rmp_serde::from_read_ref(&sb.0) {
-                        Ok(FakeResult::Ok(v)) => Ok(Ok(v)),
-                        Ok(FakeResult::Err(e)) => Ok(Err(e)),
-                        Err(e) => Err($crate::SerializedBytesError::FromBytes(e.to_string())),
-                    }
-                }
-            }
-
-
         )*
 
     };
 }
 
+holochain_serial!(crate::Result);
+
+// impl<S: $crate::serde::Serialize> std::convert::TryFrom<Result<$t, S>> for $crate::SerializedBytes {
+//     type Error = $crate::SerializedBytesError;
+//     fn try_from(r: std::result::Result<$t, S>) -> std::result::Result<$crate::SerializedBytes, $crate::SerializedBytesError> {
+//         match $crate::rmp_serde::to_vec_named(&r) {
+//             Ok(v) => Ok($crate::SerializedBytes(v)),
+//             Err(e) => Err($crate::SerializedBytesError::ToBytes(e.to_string())),
+//         }
+//     }
+// }
+
+impl<T: serde::ser::Serialize> std::convert::TryFrom<SerializedBytes> for Option<T> where SerializedBytes: TryFrom<T> {
+    type Error = SerializedBytesError;
+    fn try_from(sb: SerializedBytes) -> std::result::Result<Self, Self::Error> {
+        match crate::rmp_serde::from_read_ref(&sb.0) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(SerializedBytesError::FromBytes(e.to_string())),
+        }
+    }
+}
+
+impl<T: serde::ser::Serialize, E: serde::ser::Serialize> TryFrom<std::result::Result<T, E>>
+    for SerializedBytes
+where
+    SerializedBytes: TryFrom<T>,
+    SerializedBytes: TryFrom<E>,
+{
+    type Error = SerializedBytesError;
+    fn try_from(
+        r: std::result::Result<T, E>,
+    ) -> std::result::Result<SerializedBytes, SerializedBytesError> {
+        let enum_result = match r {
+            Ok(v) => Result::Ok(
+                SerializedBytes::try_from(v)
+                    .map_err(|_| SerializedBytesError::ToBytes("z".into()))?,
+            ),
+            Err(e) => Result::Err(
+                SerializedBytes::try_from(e)
+                    .map_err(|_| SerializedBytesError::ToBytes("y".into()))?,
+            ),
+        };
+        // match crate::rmp_serde::to_vec_named(&enum_result) {
+        //     Ok(v) => Ok(SerializedBytes(v)),
+        //     Err(e) => Err(SerializedBytesError::ToBytes(e.to_string())),
+        // }
+    }
+}
+
+impl<T: TryFrom<SerializedBytes>, E: TryFrom<SerializedBytes>> TryFrom<SerializedBytes>
+    for std::result::Result<T, E>
+{
+    type Error = SerializedBytesError;
+    fn try_from(
+        sb: SerializedBytes,
+    ) -> std::result::Result<std::result::Result<T, E>, SerializedBytesError> {
+        println!("zz {:?}", &sb);
+        match crate::rmp_serde::from_read_ref(&sb.0) {
+            Ok(crate::Result::Ok(v)) => {
+                Ok(Ok(T::try_from(v).map_err(|_e| {
+                    SerializedBytesError::FromBytes("foo".into())
+                })?))
+            }
+            Ok(crate::Result::Err(e)) => {
+                Ok(Err(E::try_from(e).map_err(|_e| {
+                    SerializedBytesError::FromBytes("bar".into())
+                })?))
+            }
+            Err(e) => Err(SerializedBytesError::FromBytes(e.to_string())),
+        }
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
 
-    use super::*;
+    use super::SerializedBytes;
     use std::convert::TryInto;
 
     /// struct with a utf8 string in it
@@ -180,6 +244,19 @@ pub mod tests {
             Err(fixture_foo()),
             vec![129, 1, 129, 165, 105, 110, 110, 101, 114, 163, 102, 111, 111]
         );
-    }
 
+        // do_test!(
+        //     Result<Bar, Result<Foo, Bar>>,
+        //     Ok(Ok(fixture_foo())),
+        //     vec![129, 1, 129, 165, 105, 110, 110, 101, 114, 163, 102, 111, 111]
+        // );
+
+        do_test!(
+            Option<Foo>,
+            Some(fixture_foo()),
+            vec![129, 165, 105, 110, 110, 101, 114, 163, 102, 111, 111]
+        );
+
+        do_test!(Option<Foo>, None, vec![192]);
+    }
 }
